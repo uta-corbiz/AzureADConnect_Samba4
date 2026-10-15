@@ -8,6 +8,11 @@ If you use this script and it works correctly - please do not be lazy to put a s
 >
 > I have no contact at Microsoft and no visibility into the future of the undocumented APIs used by this project. If you have contacts at Microsoft or relevant information, please get in touch.
 
+
+> [!NOTE]
+> the user agent is now set, yet in the MS Entra ID -> Audit Log the user agent is still empty which means this is still work in progress.
+> 
+
 # Install notes
 
 ```
