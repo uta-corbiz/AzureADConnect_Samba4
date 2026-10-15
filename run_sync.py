@@ -177,6 +177,13 @@ def run_sync(force=False,from_db=False):
     if config.has_option('common', 'use_get_syncobjects'):
         use_get_syncobjects = config.getboolean('common', 'use_get_syncobjects')
 
+    if config.has_option('common', 'user_agent'):
+        azure.user_agent = config.get('common', 'user_agent')
+    if config.has_option('common', 'app_name'):
+        azure.app_name = config.get('common', 'app_name')
+    if config.has_option('common', 'client_id'):
+        azure.client_id = config.get('common', 'client_id')
+
     azure.use_get_syncobjects = use_get_syncobjects
 
     alternate_login_id_attr = "userPrincipalName"

@@ -56,7 +56,8 @@ class AdConnect():
         self.dict_az_user={}
         self.dict_az_group={}
         self.dict_az_devices={}
-        self.verify=True
+        self.verify=True,
+        self.user_agent: str = "AzureADConnect_Samba4/0.1"
 
     def connect(self):
         if not self.az:
@@ -66,7 +67,9 @@ class AdConnect():
                                    tenant_id=self.tenant_id,
                                    cache_file=self.cache_file,
                                    domain=self.domain,
-                                   verify=self.verify)
+                                   verify=self.verify,
+                                   user_agent=self.user_agent
+            )
             self.az.get_token(scopes=["https://graph.windows.net/.default"])
             self.tenant_id = self.az.tenant_id
 
