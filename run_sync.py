@@ -190,6 +190,8 @@ def run_sync(force=False,from_db=False):
     if config.has_option('common', 'alternate_login_id_attr'):
             alternate_login_id_attr = config.get('common', 'alternate_login_id_attr')
 
+    if config.has_section('auth'):
+        azure.auth = dict(config['auth'])
 
     smb = SambaInfo(smbconf=pathsmbconf,
             url=url,

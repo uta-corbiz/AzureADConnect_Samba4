@@ -13,17 +13,19 @@ from samba.auth import system_session
 from samba.credentials import Credentials
 from samba.samdb import SamDB
 from samba import param
-from AADInternals_python.AADInternals import AADInternals
-
 from samba.dsdb import UF_ACCOUNTDISABLE
-from AdAccountReader import AdAccountReader
 
-import optparse
-import samba.getopt as options
+from AdAccountReader import AdAccountReader
+from AADInternals_python.AADInternals import AADInternals
+from app_auth import AppCertTokenProvider
+
 
 logging.getLogger("adal-python").setLevel(logging.WARN)
 
 logger = logging.getLogger()
+
+from typing import Any
+from collections.abc import MutableMapping
 
 def write_log_json_data(action,data):
     logger.info(json.dumps({'type':action,'timestamp': str(datetime.datetime.utcnow()),'data':data}))
@@ -56,11 +58,29 @@ class AdConnect():
         self.dict_az_user={}
         self.dict_az_group={}
         self.dict_az_devices={}
-        self.verify=True,
+        self.verify=True
         self.user_agent: str = "AzureADConnect_Samba4/0.1"
+        self.auth: MutableMapping[Any, Any] | None = None  # pyright: ignore[reportExplicitAny]
 
     def connect(self):
         if not self.az:
+            token_provider = None
+            if self.auth and self.auth.get("mode") == "app_cert":
+                scope_map = {}
+                sync_scope = (self.auth.get("sync_scope") or "").strip()
+            if sync_scope:
+                scope_map["https://graph.windows.net/.default"] = sync_scope
+            token_provider = AppCertTokenProvider(
+                tenant_id=self.auth["tenant_id"],
+                client_id=self.auth["client_id"],
+                private_key_path=self.auth["cert_private_key"],
+                thumbprint=self.auth.get("cert_thumbprint"),
+                public_cert_path=self.auth.get("cert_public_cert"),
+                scope_map=scope_map,
+                proxies=self.proxiesconf,
+                verify=self.verify,
+            )
+            
             self.az = AADInternals(proxies=self.proxiesconf,
                                    use_cache=self.use_cache,
                                    save_to_cache=self.save_to_cache,
