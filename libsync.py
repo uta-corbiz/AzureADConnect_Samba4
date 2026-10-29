@@ -15,6 +15,9 @@ from samba.samdb import SamDB
 from samba import param
 from AADInternals_python.AADInternals import AADInternals, SYNC_SCOPE
 
+from pathlib import Path
+from AADInternals_python._aad_certificate_manager import read_state
+
 from samba.dsdb import UF_ACCOUNTDISABLE
 from AdAccountReader import AdAccountReader
 
@@ -22,8 +25,8 @@ import optparse
 import samba.getopt as options
 
 logging.getLogger("adal-python").setLevel(logging.WARN)
-
-logger = logging.getLogger()
+logger = logging.getLogger("azure_ad_sync")
+logger.setLevel(logging.INFO)
 
 def write_log_json_data(action,data):
     logger.info(json.dumps({'type':action,'timestamp': str(datetime.datetime.utcnow()),'data':data}))
@@ -48,7 +51,7 @@ class AdConnect():
 
         self.dry_run=True
         self.sync_device=False
-        use_get_syncobjects = True
+        self.use_get_syncobjects = True
 
         self.az = None
         self.dict_az_user={}
@@ -69,7 +72,8 @@ class AdConnect():
 
     def enable_ad_sync(self):
         self.connect()
-        self.az.set_adsyncenabled(enabledirsync=True)
+        if not self.dry_run:
+            self.az.set_adsyncenabled(enabledirsync=True)
 
     def set_desktop_sso_enabled(self):
         self.connect()
@@ -83,7 +87,8 @@ class AdConnect():
 
     def enable_password_hash_sync(self):
         self.connect()
-        self.az.set_sync_features(enable_features=['PasswordHashSync'])
+        if not self.dry_run:
+            self.az.set_sync_features(enable_features=['PasswordHashSync'])
 
     def send_obj_to_az(self,entry):
         self.connect()
@@ -134,27 +139,44 @@ class AdConnect():
                 continue
             self.dict_az_group[group["onPremisesImmutableId"]] = group
 
-        return None
+        if not self.sync_device:
+            return
         try:
-            list_devices = self.az.list_devices(select="onPremisesImmutableId,id")
+            anchors = self.az.get_dict_cloudanchor_sourceanchor()
         except Exception as e:
             if 'Identity synchronization is not yet activated for this company' in str(e):
-                list_devices = []
+                anchors ={}
             else:
                 raise
-
-        if self.sync_device:
-            for device in list_devices:
-                if not device.get('onPremisesImmutableId'):
-                    continue
-                self.dict_az_devices[user["onPremisesImmutableId"]] = device
+        for cloudanchor, sourceanchor in anchors.items():
+            if cloudanchor.startswith('Device_'):
+                self.dict_az_devices[sourceanchor] ={
+                    'id': cloudanchor[len('Device_'):], 'onPremisesImmutableId': sourceanchor
+                }
 
     def send_hashnt(self,hashnt,sourceanchor):
         self.connect()
         if not self.dry_run:
             self.az.set_userpassword(hashnt=hashnt,sourceanchor=sourceanchor)
 
-
+    def get_sync_configuration(self):
+        self.connect()
+        try:
+            return self.az.get_syncconfiguration()
+        except Exception as e:
+            if 'Identity synchronization is not yet activated for this company' in str(e):
+                return {'IsDirSyncing':'false', 'DirSyncFeatures':0}
+            raise
+    
+    def identity_ready(self):
+        base = Path(self.entra_aba_dir).expanduser().resolve()
+        state = read_state(base)
+        if not state or state.get('status') != 'ready':
+            return False
+        if self.tenant_id and state.get('tenant_id') != self.tenant_id:
+            return False
+        return (base / 'current.pfx').exists()
+        
 class SambaInfo():
 
     def __init__(self, smbconf="/etc/samba/smb.conf",url='/var/lib/samba/private/sam.ldb',SourceAnchorAttr="objectSid",basedn=None,alternate_login_id_attr=None,basedn_user=None,basedn_group=None,basedn_computer=None,custom_filter_user='',custom_filter_group='',custom_filter_computer='',user=None,password=None):
@@ -255,9 +277,13 @@ class SambaInfo():
         return bool(self.samdb_loc.search(base=self.samdb_loc.get_default_basedn(),expression='(servicePrincipalName=HOST/autologon.microsoftazuread-sso.com)'))
 
     def create_azureadssoacc(self,computername='azureadssoacc'):
+        if self.dry_run:
+            return
         self.samdb_loc.newcomputer(computername,service_principal_name_list=["HOST/aadg.windows.net.nsatc.net","HOST/autologon.microsoftazuread-sso.com"])
 
     def set_password_azureadssoacc(self,password=None,computername='azureadssoacc'):
+        if self.dry_run:
+            return
         self.samdb_loc.setpassword(search_filter='(samAccountName=%s$)' % computername,password=password,force_change_at_next_login=False)
 
     def write_service_connection_point(self,tenant_id,azureadname):
@@ -318,8 +344,20 @@ ms-DS-ConsistencyGuid:: %s
 
         return decode_SourceAnchor
 
-
-
+    def _manager_anchor(self, user):
+        if not user.get('manager'):
+            return ''
+        res = self.samdb_loc.search(
+            base=user['manager'][0].decode('utf-8'), scope=ldb.SCOPE_BASE,
+            attrs=[
+                self.SourceAnchorAttr,
+                'objectSID',
+                'distinguishedName',
+                'ms-DS-ConsistencyGuid'
+            ]
+        )
+        return self.return_source_anchor(res[0]) if res else ''
+        
     def generate_all_dict(self):
         self.dict_all_users_samba={}
         self.all_dn={}
@@ -343,7 +381,8 @@ ms-DS-ConsistencyGuid:: %s
                     hashnt = hashnt.hex().upper()
             else:
                 passwordattr = 'unicodePwd'
-                password = self.samdb_loc.search(self.samdb_loc.get_default_basedn(),expression="(sAMAccountName=%s)" % str(user["sAMAccountName"]) ,scope=ldb.SCOPE_SUBTREE,attrs=[passwordattr])[0]
+                password = self.samdb_loc.search(self.samdb_loc.get_default_basedn(),expression="(sAMAccountName=%s)" % ldb.binary_encode(str(user["sAMAccountName"])) ,scope=ldb.SCOPE_SUBTREE,attrs=[passwordattr])[0]
+
                 if not passwordattr in password:
                     continue
                 hashnt = password[passwordattr][0].hex().upper()
@@ -371,7 +410,8 @@ ms-DS-ConsistencyGuid:: %s
                        "onPremisesSamAccountName"   : user.get("sAMAccountName",[b''])[0].decode('utf-8'),
                        "onPremisesDistinguishedName": str(user["dn"]),
                        "dnsDomainName"              : self.domaine,
-                       "manager"                    : self.return_source_anchor(self.samdb_loc.search(self.samdb_loc.get_default_basedn(),expression="(distinguishedName=%s)" % user.get("manager")[0].decode('utf-8'),attrs=[self.SourceAnchorAttr,'objectSID','distinguishedName','ms-DS-ConsistencyGuid'])[0]) if user.get("manager") else ''  ,
+                       #"manager"                    : self.return_source_anchor(self.samdb_loc.search(self.samdb_loc.get_default_basedn(),expression="(distinguishedName=%s)" % user.get("manager")[0].decode('utf-8'),attrs=[self.SourceAnchorAttr,'objectSID','distinguishedName','ms-DS-ConsistencyGuid'])[0]) if user.get("manager") else ''  ,
+                       "manager"                    : self._manager_anchor(user) ,
                        "displayName"                : user.get("displayName",[b''])[0].decode('utf-8'),
                        "onPremiseSecurityIdentifier": base64.b64encode(user["objectSid"][0]).decode('utf-8'),
                        "userCertificate"            : [base64.b64encode(c).decode('utf-8') for c in user.get("userCertificate",[])],
@@ -411,6 +451,8 @@ ms-DS-ConsistencyGuid:: %s
      
             if self.callback_calculated_user != None:
                 data = self.callback_calculated_user(sambaobj=self.samdb_loc,entry=user,result=data)
+                if not data:
+                    continue
                 SourceAnchor = data['SourceAnchor']
 
             if not SourceAnchor:
@@ -459,6 +501,8 @@ ms-DS-ConsistencyGuid:: %s
 
                 if self.callback_calculated_device != None:
                     data = self.callback_calculated_device(sambaobj=self.samdb_loc,entry=device,result=data)
+                    if not data:
+                        continue
                     SourceAnchor = data['SourceAnchor']
 
                 if not data:
@@ -498,6 +542,8 @@ ms-DS-ConsistencyGuid:: %s
 
             if self.callback_calculated_group != None:
                 data = self.callback_calculated_group(sambaobj=self.samdb_loc,entry=group,result=data)
+                if not data:
+                    continue
                 SourceAnchor = data['SourceAnchor']
 
             if not data:
